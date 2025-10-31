@@ -8,6 +8,7 @@
 \usepackage{geometry}
 \usepackage{listings}
 \usepackage{float}
+\usepackage{xcolor}
 
 \geometry{margin=2.5cm}
 \title{EA/ECAC 2025 --- TP1\\Classificação de Atividades Humanas}
@@ -21,7 +22,8 @@
     stringstyle=\color{red},
     commentstyle=\color{green!40!black},
     breaklines=true,
-    showstringspaces=false
+    showstringspaces=false,
+    upquote=true
 }
 
 \begin{document}
@@ -89,7 +91,7 @@ Analisando Sensor: Pulso Direito
 |-----------------------|-----------|--------------|-----------------|---------------|
 | Módulo Acelerômetro   |         1 |       157882 |            6624 |          4.20% |
 | Módulo Acelerômetro   |         2 |        83968 |             181 |          0.22% |
-... 
+...
 | Módulo Magnetômetro   |        16 |         1905 |              30 |          1.57% |
 
 --- Fim Tarefa 3.2 ---
@@ -198,7 +200,7 @@ Top-10 features (ReliefF):
 \end{verbatim}
 
 \section{Conclusão}
-A este trabalho prático permitiu a aplicação de uma pipeline completa de análise de dados a um problema de reconhecimento de atividades humanas. Foram exploradas várias técnicas para tratamento de outliers, extração e seleção de features.
+Este trabalho prático permitiu a aplicação de uma pipeline completa de análise de dados a um problema de reconhecimento de atividades humanas. Foram exploradas várias técnicas para tratamento de outliers, extração e seleção de features.
 
 Os resultados demonstram a importância de cada etapa da pipeline. A análise de outliers revelou diferentes densidades dependendo do método utilizado. A extração de features gerou um espaço de características rico, e a seleção de features com PCA, Fisher Score e ReliefF permitiu identificar as características mais relevantes para a discriminação das atividades.
 
