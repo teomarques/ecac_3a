@@ -32,10 +32,10 @@
 \section{Introdução}
 O presente relatório detalha a implementação de uma pipeline de análise de dados para o reconhecimento de atividades humanas (Human Activity Recognition - HAR), utilizando o dataset FORTH-TRACE. O objetivo principal é exercitar os conceitos fundamentais de uma pipeline de análise de dados, desde a preparação e limpeza dos dados até à extração, seleção e redução de características.
 
-O trabalho está estruturado de acordo com as tarefas propostas no guião do Trabalho Prático 1 (TP1.pdf). Cada secção deste relatório corresponde a uma tarefa, explicando a metodologia adotada, as funções implementadas no script \texttt{mainActivity.py}, e os resultados obtidos, incluindo gráficos e tabelas.
+O trabalho está estruturado de acordo com as tarefas propostas no guião do Trabalho Prático 1 (TP1.pdf). Cada secção deste relatório corresponde a uma tarefa, explicando a metodologia adotada, as funções implementadas no script \texttt{mainActivity\_py}, e os resultados obtidos, incluindo gráficos e tabelas.
 
 \section{Tarefa 2: Carregamento de Dados}
-A primeira etapa consistiu em desenvolver uma função para carregar os dados de um participante a partir dos ficheiros CSV. A função \texttt{carregar_dados_participante} lê os 5 ficheiros de um determinado participante e concatena-os num único array NumPy para facilitar a manipulação posterior.
+A primeira etapa consistiu em desenvolver uma função para carregar os dados de um participante a partir dos ficheiros CSV. A função \texttt{carregar\_dados\_participante} lê os 5 ficheiros de um determinado participante e concatena-os num único array NumPy para facilitar a manipulação posterior.
 
 \begin{lstlisting}[caption={Função para carregar os dados de um participante.}, label={lst:load_data}]
 def carregar_dados_participante(num_participante, base_dir="."):
