@@ -1,0 +1,11 @@
+feature
+dev1_gyr_mod_spec_entropy
+dev1_acc_z_spec_centroid
+dev1_acc_z_spec_entropy
+dev1_acc_x_spec_centroid
+dev1_gyr_z_spec_entropy
+dev1_acc_x_spec_entropy
+dev1_gyr_mod_spec_centroid
+dev1_gyr_z_spec_centroid
+dev1_gyr_x_spec_centroid
+dev1_gyr_x_spec_entropy

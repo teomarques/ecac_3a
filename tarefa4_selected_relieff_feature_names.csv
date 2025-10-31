@@ -1,0 +1,11 @@
+feature
+dev1_gyr_y_spec_dom_freq
+dev1_gyr_z_spec_dom_freq
+dev1_gyr_mod_spec_dom_freq
+dev1_gyr_x_spec_dom_freq
+dev1_acc_mod_spec_dom_freq
+dev1_acc_z_spec_dom_freq
+dev1_mag_x_spec_dom_freq
+dev1_mag_mod_spec_dom_freq
+dev1_mag_y_spec_dom_freq
+dev1_acc_y_spec_dom_freq
