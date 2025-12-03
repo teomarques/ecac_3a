@@ -15,6 +15,7 @@ from sklearn.cluster import DBSCAN      # Apenas para o bónus 3.7.1
 from scipy import stats, signal
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
 
 # --- Constantes Globais (Baseado no PDF) ---
 # Mapeamento 1-para-1 com o PDF (1-based-indexing) para 0-based-indexing
@@ -51,6 +52,14 @@ SENSOR_LABELS = {
     4: "Perna Sup. Direita", # ID 4
     5: "Perna Inf. Esquerda" # ID 5
 }
+
+# Constante para Meta 2: Atividades válidas (1 a 7)
+ATIVIDADES_META2 = [1, 2, 3, 4, 5, 6, 7]
+ATIVIDADE_META2_MAX = 7
+
+
+# ///// META 1 /////
+
 
 # --- Tarefa 2: Carregamento de Dados  ---
 
@@ -531,12 +540,7 @@ def analisar_outliers_kmeans_3_7(dados, n_clusters_lista):
         print(f"Gráfico 'graphs/meta1_tarefa_3_7_kmeans_k{n_clusters}_sem_outliers.png' guardado.")
         # plt.show()
 
-    print("\n--- Discussão (Comparação 3.7 vs 3.4) ---")
-    print("O que este plot 3D nos diz (Evocação Ativa):")
-    print("1. O K-Means (3.7) é 'multivariado'. Encontra outliers no espaço 3D (x,y,z).")
-    print("2. O Z-Score (3.4) foi 'univariado'. Analisou o *módulo* (um único número) de cada vez.")
-    print("3. Diferença Chave: Um ponto pode ser um outlier 3D (K-Means) sem ser um outlier 1D (Z-Score).")
-    print("   Exemplo: Um valor de (x=1, y=1, z=1) pode ser normal. (x=5, y=1, z=1) pode ser normal. Mas (x=5, y=5, z=5) pode ser uma combinação *impossível* para o sensor, mesmo que 5 não seja um outlier no Z-Score. O K-Means deteta isto.")
+    
     print("--- Fim Tarefa 3.7 ---")
 
 # --- Tarefa 3.7.1 (Bónus): Outliers com DBSCAN  ---
@@ -964,41 +968,308 @@ def reportar_top_features_4_6(scores, feature_names, topk=10, titulo=""):
     for rank, j in enumerate(order, 1):
         print(f"  {rank:2d}. {feature_names[j]}  (score={scores[j]:.4f}, |score|={magnitudes[j]:.4f})")
 
+
+
+
+# ///// META 2 /////
+
+# --- TAREFA 1: Data Augmentation ---
+
+def filtrar_atividades_meta2(X, y):
+    """
+    (Helper Meta 2) Filtra X e y para manter apenas atividades 1-7.
+    
+    Parâmetros:
+        X: matriz de features (n_amostras, n_features)
+        y: vetor de rótulos (n_amostras,)
+    
+    Retorna:
+        X_filtrado, y_filtrado
+    """
+    mask = y <= ATIVIDADE_META2_MAX
+    return X[mask], y[mask]
+
+
+def analisar_balanceamento_1_1(y):
+    """
+    (Tarefa 1.1) Analisa o equilíbrio das atividades 1 a 7.
+    Nota: Esta função assume que y já foi filtrado para conter apenas atividades 1-7.
+    """
+    print("\n--- Tarefa 1.1: Análise de Balanceamento (Atividades 1-7) ---")
+    
+    # y já deve estar filtrado, mas garantir
+    mask = y <= ATIVIDADE_META2_MAX
+    y_subset = y[mask]
+    
+    classes, counts = np.unique(y_subset, return_counts=True)
+    
+    print("Contagem de amostras por atividade:")
+    total = 0
+    for cls, count in zip(classes, counts):
+        print(f"  Atividade {int(cls)}: {count} amostras")
+        total += count
+    
+    print(f"Total de amostras (atividades 1-7): {total}")
+        
+    # Verificar balanceamento (ex: desvio padrão das contagens)
+    std_counts = np.std(counts)
+    media_counts = np.mean(counts)
+    cv = std_counts / media_counts # Coeficiente de variação
+    
+    print(f"\nEstatísticas de balanceamento:")
+    print(f"  Média: {media_counts:.1f}")
+    print(f"  Desvio padrão: {std_counts:.1f}")
+    print(f"  Coeficiente de variação: {cv:.3f}")
+    
+    if cv < 0.2: # Limiar arbitrário para "balanceado"
+        print("-> O dataset parece razoavelmente balanceado.")
+    else:
+        print("-> O dataset NÃO está balanceado (diferenças significativas nas contagens).")
+    
+    # Gráfico de barras
+    plt.figure(figsize=(10, 6))
+    plt.bar(classes, counts, color='skyblue', edgecolor='black', alpha=0.7)
+    plt.title("Distribuição das Atividades (1-7)", fontsize=16, fontweight='bold')
+    plt.xlabel("Atividade", fontsize=14)
+    plt.ylabel("Número de Segmentos", fontsize=14)
+    plt.xticks(classes)
+    plt.grid(axis='y', alpha=0.5)
+    
+    # Adicionar valores no topo das barras
+    for cls, count in zip(classes, counts):
+        plt.text(cls, count, str(count), ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig("graphs/meta2_tarefa1_1_balanceamento.png", dpi=150)
+    print("\nGráfico de balanceamento guardado em 'graphs/meta2_tarefa1_1_balanceamento.png'.")
+    print("--- Fim Tarefa 1.1 ---")
+
+
+def gerar_smote_1_2(X, y, atividade_alvo, K, k_neighbors=5, random_state=42):
+    """
+    (Tarefa 1.2) Implementação do SMOTE para gerar K novas amostras
+    para uma dada atividade.
+    
+    Parâmetros:
+        X: matriz de features (n_amostras, n_features) - apenas atividades 1-7
+        y: vetor de rótulos (n_amostras,) - apenas atividades 1-7
+        atividade_alvo: ID da atividade para augmentação (deve estar em ATIVIDADES_META2)
+        K: número de amostras sintéticas a gerar
+        k_neighbors: número de vizinhos a considerar
+        random_state: seed para reprodutibilidade
+    
+    Retorna: 
+        array numpy com as K amostras sintéticas (K, n_features)
+    """
+    # Configurar random state para reprodutibilidade
+    np.random.seed(random_state)
+    
+    # 1. Selecionar todas as amostras da classe alvo
+    mask = y == atividade_alvo
+    X_classe = X[mask]
+    n_amostras = X_classe.shape[0]
+    
+    if n_amostras < 2:
+        print(f"[Aviso] Amostras insuficientes ({n_amostras}) para SMOTE na atividade {atividade_alvo}.")
+        return np.zeros((0, X.shape[1]))
+
+    # Ajustar k_neighbors se houver poucas amostras
+    k_neighbors = min(k_neighbors, n_amostras - 1)
+    if k_neighbors < 1:
+        print(f"[Aviso] k_neighbors ajustado para {k_neighbors}, mas é insuficiente.")
+        return np.zeros((0, X.shape[1]))
+
+    # 2. Fit k-Nearest Neighbors
+    # Usamos k+1 porque o primeiro vizinho é o próprio ponto
+    nbrs = NearestNeighbors(n_neighbors=k_neighbors + 1, metric='euclidean').fit(X_classe)
+    
+    amostras_sinteticas = []
+    
+    print(f"  A gerar {K} amostras sintéticas para atividade {atividade_alvo}...")
+    
+    for i in range(K):
+        # a. Escolher aleatoriamente uma amostra base (índice i)
+        idx_base = np.random.randint(0, n_amostras)
+        vetor_base = X_classe[idx_base]
+        
+        # b. Encontrar os k vizinhos mais próximos
+        distancias, indices = nbrs.kneighbors(vetor_base.reshape(1, -1))
+        # O indices[0] contém os índices em X_classe. O primeiro é ele próprio.
+        vizinhos_indices = indices[0][1:]
+        
+        # c. Escolher aleatoriamente um dos vizinhos
+        idx_vizinho = np.random.choice(vizinhos_indices)
+        vetor_vizinho = X_classe[idx_vizinho]
+        
+        # d. Interpolar: novo = base + rand * (vizinho - base)
+        gap = np.random.random()
+        diff = vetor_vizinho - vetor_base
+        novo_vetor = vetor_base + (gap * diff)
+        
+        amostras_sinteticas.append(novo_vetor)
+        
+    return np.array(amostras_sinteticas)
+
+
+def tarefa_1_3_visualizacao(base_dir="."):
+    """
+    (Tarefa 1.3) Gera e visualiza 3 novas amostras da atividade 4
+    do participante 3.
+    Nota: Filtra automaticamente para manter apenas atividades 1-7 (META 2).
+    """
+    print("\n--- Tarefa 1.3: Visualização SMOTE (Participante 3, Ativ 4) ---")
+    
+    # 1. Carregar dados APENAS do participante 3
+    print("A carregar dados do Participante 3...")
+    dados_p3 = carregar_dados_participante(3, base_dir=base_dir)
+    
+    if dados_p3.size == 0:
+        print("[Erro] Não foi possível carregar dados do participante 3.")
+        return
+
+    # 2. Extrair features para este participante
+    print("A extrair features do participante 3...")
+    X_p3, y_p3, feat_names = construir_feature_set_4_2(dados_p3, fs=51.2)
+    
+    if X_p3.shape[0] == 0:
+        print("[Erro] Nenhuma feature extraída para o participante 3.")
+        return
+    
+    print(f"Features extraídas: {X_p3.shape}")
+    
+    # Filtrar apenas atividades 1-7 (conforme constante ATIVIDADE_META2_MAX)
+    mask_valid = y_p3 <= ATIVIDADE_META2_MAX
+    X_p3 = X_p3[mask_valid]
+    y_p3 = y_p3[mask_valid]
+    
+    print(f"Após filtro (ativ 1-{ATIVIDADE_META2_MAX}): {X_p3.shape}")
+
+    # 3. Gerar 3 amostras sintéticas para atividade 4
+    atividade_alvo = 4
+    K = 3
+    print(f"\nA gerar {K} amostras sintéticas para a atividade {atividade_alvo}...")
+    X_sintetico = gerar_smote_1_2(X_p3, y_p3, atividade_alvo, K=K, k_neighbors=5)
+    
+    if X_sintetico.shape[0] != K:
+        print("[Erro] Falha ao gerar amostras sintéticas.")
+        return
+    
+    print(f"Amostras sintéticas geradas com sucesso: {X_sintetico.shape}")
+    
+    # 4. Visualização 2D (primeiras 2 features)
+    # Criar figura com 2 subplots
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # --- Subplot 1: Features 0 vs 1 ---
+    ax1 = axes[0]
+    
+    # Plotar amostras originais (coloridas por atividade)
+    classes_presentes = np.unique(y_p3)
+    colors = plt.cm.tab10(np.linspace(0, 1, len(classes_presentes)))
+    
+    for cls, color in zip(classes_presentes, colors):
+        mask = y_p3 == cls
+        label_text = f'Atividade {int(cls)}'
+        if cls == atividade_alvo:
+            label_text += ' (Original)'
+        ax1.scatter(X_p3[mask, 0], X_p3[mask, 1], 
+                   alpha=0.5, s=30, color=color, label=label_text)
+    
+    # Plotar amostras sintéticas (destacadas)
+    ax1.scatter(X_sintetico[:, 0], X_sintetico[:, 1], 
+               color='red', marker='*', s=400, 
+               edgecolors='black', linewidths=1.5,
+               label=f'Sintético SMOTE (Ativ {atividade_alvo})', 
+               zorder=10)
+    
+    ax1.set_xlabel(f"Feature 1: {feat_names[0]}", fontsize=12)
+    ax1.set_ylabel(f"Feature 2: {feat_names[1]}", fontsize=12)
+    ax1.set_title(f"SMOTE - Features 1 vs 2", fontsize=14, fontweight='bold')
+    ax1.legend(loc='best', fontsize=9)
+    ax1.grid(True, linestyle='--', alpha=0.3)
+    
+    # --- Subplot 2: Features 2 vs 3 (visualização alternativa) ---
+    ax2 = axes[1]
+    
+    for cls, color in zip(classes_presentes, colors):
+        mask = y_p3 == cls
+        label_text = f'Atividade {int(cls)}'
+        if cls == atividade_alvo:
+            label_text += ' (Original)'
+        ax2.scatter(X_p3[mask, 2], X_p3[mask, 3], 
+                   alpha=0.5, s=30, color=color, label=label_text)
+    
+    ax2.scatter(X_sintetico[:, 2], X_sintetico[:, 3], 
+               color='red', marker='*', s=400, 
+               edgecolors='black', linewidths=1.5,
+               label=f'Sintético SMOTE (Ativ {atividade_alvo})', 
+               zorder=10)
+    
+    ax2.set_xlabel(f"Feature 3: {feat_names[2]}", fontsize=12)
+    ax2.set_ylabel(f"Feature 4: {feat_names[3]}", fontsize=12)
+    ax2.set_title(f"SMOTE - Features 3 vs 4", fontsize=14, fontweight='bold')
+    ax2.legend(loc='best', fontsize=9)
+    ax2.grid(True, linestyle='--', alpha=0.3)
+    
+    plt.tight_layout()
+    filename = "graphs/meta2_tarefa1_3_smote_visualizacao.png"
+    plt.savefig(filename, dpi=150)
+    print(f"\nGráfico guardado em '{filename}'.")
+    
+    # 5. Imprimir estatísticas das amostras geradas
+    print("\n--- Estatísticas das Amostras Sintéticas ---")
+    print(f"Forma: {X_sintetico.shape}")
+    print(f"Primeiras 5 features da 1ª amostra sintética:")
+    print(X_sintetico[0, :5])
+    
+    # Comparar com média das amostras originais da atividade 4
+    X_orig_ativ4 = X_p3[y_p3 == atividade_alvo]
+    media_orig = X_orig_ativ4.mean(axis=0)
+    print(f"\nMédia das originais (ativ {atividade_alvo}, primeiras 5 features):")
+    print(media_orig[:5])
+    
+    print("--- Fim Tarefa 1.3 ---")
+
+
 # --- Função Principal (main)  ---
 def main():
     """
-    Função principal que orquestra a execução das tarefas da Meta 1.
+    Função principal que orquestra a execução das tarefas da Meta 1 e Meta 2.
     """
 
     # --- PAINEL DE CONTROLO ---
     # Defina como True/False para executar/saltar cada tarefa
 
-    # Tarefa 2: Carregar dados de 1 participante (teste rápido)
+    # META 1: Tarefa 2: Carregar dados de 1 participante (teste rápido)
     RUN_TASK_2_TEST = False
 
-    # Tarefa 3.1: Gerar os 15 boxplots (Requer 'dados_todos')
-    RUN_TASK_3_1 = True
+    # META 1: Tarefa 3.1: Gerar os 15 boxplots (Requer 'dados_todos')
+    RUN_TASK_3_1 = False
 
-    # Tarefa 3.2: Calcular densidade IQR (Pulso Direito)
-    RUN_TASK_3_2 = True
+    # META 1: Tarefa 3.2: Calcular densidade IQR (Pulso Direito)
+    RUN_TASK_3_2 = False
 
-    # Tarefa 3.4: Gerar plots Z-Score (Demorado: 3x15 plots)
-    RUN_TASK_3_4 = True
+    # META 1: Tarefa 3.4: Gerar plots Z-Score (Demorado: 3x15 plots)
+    RUN_TASK_3_4 = False
 
-    # Tarefa 3.5: Gerar tabela comparativa de densidades
-    RUN_TASK_3_5 = True
+    # META 1: Tarefa 3.5: Gerar tabela comparativa de densidades
+    RUN_TASK_3_5 = False
 
-    # Tarefa 3.7: Gerar plots K-Means 3D (Exemplo focado)
-    RUN_TASK_3_7 = True
+    # META 1: Tarefa 3.7: Gerar plots K-Means 3D (Exemplo focado)
+    RUN_TASK_3_7 = False
 
-    # Tarefa 3.7.1 (Bónus): Gerar plot DBSCAN 3D
-    RUN_TASK_3_7_1 = True
+    # META 1: Tarefa 3.7.1 (Bónus): Gerar plot DBSCAN 3D
+    RUN_TASK_3_7_1 = False
 
-    # Tarefa 4: Extração de informação característica
-    RUN_TASK_4_1 = True
-    RUN_TASK_4_2 = True  # janelação + features
-    RUN_TASK_4_3_4_4 = True  # PCA e variância
-    RUN_TASK_4_5_4_6 = True  # Fisher, ReliefF e top-10
+    # META 1: Tarefa 4: Extração de informação característica
+    RUN_TASK_4_1 = False
+    RUN_TASK_4_2 = False  # janelação + features
+    RUN_TASK_4_3_4_4 = False  # PCA e variância
+    RUN_TASK_4_5_4_6 = False  # Fisher, ReliefF e top-10
+
+    # META 2: Tarefa 1 - Data Augmentation
+    RUN_META2_TASK_1_1 = True  # Análise de balanceamento
+    RUN_META2_TASK_1_3 = True  # Visualização SMOTE
 
     # --- FIM PAINEL DE CONTROLO ---
 
@@ -1116,9 +1387,27 @@ def main():
                 except Exception as e:
                     print(f"[Aviso] Falha ao guardar features selecionadas: {e}")
 
+    # --- META 2: Data Augmentation ---
+    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3:
+        print("\n=== META 2: TAREFA 1 - DATA AUGMENTATION ===")
+        print(f"Nota: Meta 2 considera APENAS atividades 1-{ATIVIDADE_META2_MAX}\n")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        if RUN_META2_TASK_1_1:
+            # Carregar todos os dados para análise de balanceamento
+            dados_todos = carregar_dados_todos_participantes(base_dir=script_dir)
+            if dados_todos.size > 0:
+                X_all, y_all, _ = construir_feature_set_4_2(dados_todos, fs=51.2)
+                # Filtrar para manter apenas atividades 1-7 (META 2)
+                X_all, y_all = filtrar_atividades_meta2(X_all, y_all)
+                print(f"Dataset filtrado (ativ 1-{ATIVIDADE_META2_MAX}): {X_all.shape[0]} amostras")
+                analisar_balanceamento_1_1(y_all)
+        
+        if RUN_META2_TASK_1_3:
+            # Visualização SMOTE para participante 3
+            tarefa_1_3_visualizacao(base_dir=script_dir)
 
-
-    print("\nExecução da Meta 1 concluída.")
+    print("\n=== Execução Concluída ===")
 
 
 if __name__ == "__main__":
