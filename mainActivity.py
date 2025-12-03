@@ -16,6 +16,7 @@ from scipy import stats, signal
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
+import torch
 
 # --- Constantes Globais (Baseado no PDF) ---
 # Mapeamento 1-para-1 com o PDF (1-based-indexing) para 0-based-indexing
@@ -58,8 +59,45 @@ ATIVIDADES_META2 = [1, 2, 3, 4, 5, 6, 7]
 ATIVIDADE_META2_MAX = 7
 
 
-# ///// META 1 /////
+# --- Funções baseadas no embeddings_extractor.py ---
 
+def load_model():
+    """
+    (Do ficheiro embeddings_extractor.py)
+    Carrega o modelo HARNet5 do repositório GitHub e extrai o feature_encoder.
+    """
+    print("A carregar modelo HARNet5 (necessita de internet na 1ª execução)...")
+    repo = 'OxWearables/ssl-wearables'
+    # class_num não é usado para extração, mas é argumento obrigatório
+    model = torch.hub.load(repo, 'harnet5', class_num=5, pretrained=True)
+    model.eval()
+
+    # Extrair apenas o extrator de features (camadas convolucionais)
+    feature_encoder = model.feature_extractor
+    feature_encoder.to("cpu")
+    feature_encoder.eval()
+    return feature_encoder
+
+def resample_to_30hz_5s(acc_xyz, fs_in_hz):
+    """
+    (Do ficheiro embeddings_extractor.py)
+    Reamostra um segmento de acelerómetro para 30Hz.
+    Retorna: (sinal_reamostrado, nova_frequencia)
+    """
+    fs_target = 30.0
+    win_size = 5 # segundos
+    t_in = np.arange(acc_xyz.shape[0]) / fs_in_hz
+    t_out = np.arange(0, win_size, 1.0/fs_target)
+
+    acc_resampled = np.zeros((len(t_out), 3), dtype=np.float32)
+    for axis in range(3):
+        acc_resampled[:, axis] = np.interp(t_out, t_in, acc_xyz[:, axis])
+
+    return acc_resampled, fs_target
+
+# -----------------------------------
+
+# ///// META 1 /////
 
 # --- Tarefa 2: Carregamento de Dados  ---
 
@@ -1231,6 +1269,73 @@ def tarefa_1_3_visualizacao(base_dir="."):
     print("--- Fim Tarefa 1.3 ---")
 
 
+def gerar_embeddings_dataset_2_1(segmentos, fs_original=51.2):
+    """
+    (Tarefa 2.1) Aplica as funções do embeddings_extractor.py para criar o dataset.
+    """
+    print(f"\n--- Tarefa 2.1: A gerar Embeddings para {len(segmentos)} segmentos ---")
+    
+    if not segmentos:
+        print("[Aviso] Nenhum segmento para processar.")
+        return np.array([])
+
+    # 1. Preparar os dados (Reamostragem)
+    resampled_segments = []
+    
+    for i, seg in enumerate(segmentos):
+        # O modelo só usa Acelerómetro (colunas 0, 1, 2 do teu 'X')
+        acc_data = seg['X'][:, 0:3]
+        
+        # Aplicar a função do ficheiro fornecido
+        # Nota: a função retorna (dados, fs), por isso usamos [0]
+        acc_30hz, _ = resample_to_30hz_5s(acc_data, fs_in_hz=fs_original)
+        
+        resampled_segments.append(acc_30hz)
+
+    # Converter para numpy array: Shape (N_segmentos, 150, 3)
+    # 150 amostras = 5 segundos * 30Hz
+    x_all = np.array(resampled_segments)
+    
+    # 2. Transpor para o formato esperado pelo PyTorch (Batch, Canais, Tempo)
+    # De (N, 150, 3) para (N, 3, 150)
+    x_all = np.transpose(x_all, (0, 2, 1))
+    
+    print(f"  Shape de entrada no modelo: {x_all.shape}")
+
+    # 3. Carregar o Modelo
+    try:
+        feature_encoder = load_model()
+    except Exception as e:
+        print(f"[ERRO] Falha ao carregar o modelo (verifique a internet/PyTorch): {e}")
+        return np.array([])
+
+    # 4. Inferência em Batches (para gerir memória)
+    embeddings_list = []
+    batch_size = 32 # Processa 32 segmentos de cada vez
+    
+    with torch.no_grad(): # Desativa gradientes para poupar memória e ser mais rápido
+        for i in range(0, x_all.shape[0], batch_size):
+            # Selecionar batch
+            batch_numpy = x_all[i : i + batch_size]
+            
+            # Converter para Tensor PyTorch (Float)
+            batch_tensor = torch.from_numpy(batch_numpy).float().to("cpu")
+            
+            # Passar pelo modelo
+            emb_batch = feature_encoder(batch_tensor)
+            
+            # Guardar resultado (converter de volta para numpy)
+            embeddings_list.append(emb_batch.cpu().numpy())
+            
+            if (i // batch_size) % 5 == 0:
+                print(f"    Processado batch {i // batch_size}...")
+
+    # Concatenar todos os resultados
+    embeddings_final = np.concatenate(embeddings_list, axis=0)
+    print(f"  Embeddings gerados com sucesso. Shape final: {embeddings_final.shape}")
+    
+    return embeddings_final
+
 # --- Função Principal (main)  ---
 def main():
     """
@@ -1270,6 +1375,9 @@ def main():
     # META 2: Tarefa 1 - Data Augmentation
     RUN_META2_TASK_1_1 = True  # Análise de balanceamento
     RUN_META2_TASK_1_3 = True  # Visualização SMOTE
+    
+    # META 2: Tarefa 2 - Embeddings
+    RUN_META2_TASK_2_1 = True  # Gerar Embeddings Dataset
 
     # --- FIM PAINEL DE CONTROLO ---
 
@@ -1387,25 +1495,99 @@ def main():
                 except Exception as e:
                     print(f"[Aviso] Falha ao guardar features selecionadas: {e}")
 
-    # --- META 2: Data Augmentation ---
-    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3:
-        print("\n=== META 2: TAREFA 1 - DATA AUGMENTATION ===")
-        print(f"Nota: Meta 2 considera APENAS atividades 1-{ATIVIDADE_META2_MAX}\n")
+    # ==========================================
+    # --- META 2 (MÓDULO B) ---
+    # ==========================================
+    
+    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3 or RUN_META2_TASK_2_1:
+        print("\n" + "="*60)
+        print("=== META 2 (MÓDULO B): DATA AUGMENTATION & EMBEDDINGS ===")
+        print("="*60)
+        print(f"Nota: Módulo B considera APENAS atividades 1-{ATIVIDADE_META2_MAX}\n")
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
-        if RUN_META2_TASK_1_1:
-            # Carregar todos os dados para análise de balanceamento
-            dados_todos = carregar_dados_todos_participantes(base_dir=script_dir)
-            if dados_todos.size > 0:
-                X_all, y_all, _ = construir_feature_set_4_2(dados_todos, fs=51.2)
-                # Filtrar para manter apenas atividades 1-7 (META 2)
-                X_all, y_all = filtrar_atividades_meta2(X_all, y_all)
-                print(f"Dataset filtrado (ativ 1-{ATIVIDADE_META2_MAX}): {X_all.shape[0]} amostras")
-                analisar_balanceamento_1_1(y_all)
+        # 1. SEGMENTAÇÃO COMUM (Fonte única para Features e Embeddings)
+        print("--- Etapa 1: Segmentação de Dados (5s, 50% overlap) ---")
         
-        if RUN_META2_TASK_1_3:
-            # Visualização SMOTE para participante 3
-            tarefa_1_3_visualizacao(base_dir=script_dir)
+        # Verificar se dados_todos já foi carregado
+        if 'dados_todos' not in locals():
+            print("A carregar todos os dados dos participantes...")
+            dados_todos = carregar_dados_todos_participantes(base_dir=script_dir)
+        
+        if dados_todos.size == 0:
+            print("[ERRO] Nenhum dado disponível. A saltar Meta 2.")
+        else:
+            # Segmentar janelas puras (reutiliza função da Tarefa 4.2)
+            print("A segmentar janelas puras (atividade constante)...")
+            segmentos = segmentar_janelas_puras_4_2(dados_todos, fs=51.2, janela_s=5.0, overlap=0.5)
+            
+            # Extrair labels de todas as janelas
+            y_todos = np.array([seg['activity'] for seg in segmentos], dtype=int)
+            print(f"Total de segmentos gerados: {len(segmentos)}")
+            print(f"Distribuição de atividades: {np.unique(y_todos, return_counts=True)}")
+            
+            # 2. FILTRAGEM GLOBAL (Apenas Atividades 1-7 do Módulo B)
+            print(f"\n--- Etapa 2: Filtragem para Atividades 1-{ATIVIDADE_META2_MAX} ---")
+            mask_mod_b = y_todos <= ATIVIDADE_META2_MAX
+            
+            segmentos_mod_b = [seg for i, seg in enumerate(segmentos) if mask_mod_b[i]]
+            y_mod_b = y_todos[mask_mod_b]
+            
+            print(f"Segmentos após filtro: {len(segmentos_mod_b)}")
+            print(f"Distribuição filtrada: {dict(zip(*np.unique(y_mod_b, return_counts=True)))}")
+            
+            # 3. TAREFA 1: Data Augmentation (Features Manuais)
+            if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3:
+                print("\n" + "-"*60)
+                print("--- TAREFA 1: Data Augmentation (Features Manuais) ---")
+                print("-"*60)
+                
+                if RUN_META2_TASK_1_1:
+                    # Extrair features manuais dos segmentos filtrados
+                    print("\nA extrair features manuais (144 features/janela)...")
+                    X_features = []
+                    for seg in segmentos_mod_b:
+                        fv, _ = extrair_features_janela_4_2(seg, fs=51.2)
+                        X_features.append(fv)
+                    X_features = np.vstack(X_features)
+                    
+                    print(f"Features extraídas: {X_features.shape}")
+                    analisar_balanceamento_1_1(y_mod_b)
+                
+                if RUN_META2_TASK_1_3:
+                    # Visualização SMOTE para participante 3
+                    tarefa_1_3_visualizacao(base_dir=script_dir)
+            
+            # 4. TAREFA 2: Embeddings Dataset
+            if RUN_META2_TASK_2_1:
+                print("\n" + "-"*60)
+                print("--- TAREFA 2.1: Geração de Embeddings (Modelo Pré-treinado) ---")
+                print("-"*60)
+                
+                # Gerar embeddings dos segmentos filtrados
+                X_embeddings = gerar_embeddings_dataset_2_1(segmentos_mod_b, fs_original=51.2)
+                
+                if X_embeddings.size > 0:
+                    print(f"\n✓ Dataset de Embeddings criado com sucesso!")
+                    print(f"  Shape: {X_embeddings.shape}")
+                    print(f"  Labels: {y_mod_b.shape}")
+                    
+                    # Estatísticas dos embeddings
+                    print(f"\nEstatísticas dos Embeddings:")
+                    print(f"  Média: {X_embeddings.mean():.4f}")
+                    print(f"  Desvio padrão: {X_embeddings.std():.4f}")
+                    print(f"  Min: {X_embeddings.min():.4f}")
+                    print(f"  Max: {X_embeddings.max():.4f}")
+                    
+                    # Opcional: Guardar embeddings para uso posterior
+                    try:
+                        np.save("meta2_embeddings_X.npy", X_embeddings)
+                        np.save("meta2_embeddings_y.npy", y_mod_b)
+                        print(f"\n✓ Embeddings guardados em 'meta2_embeddings_X.npy' e 'meta2_embeddings_y.npy'")
+                    except Exception as e:
+                        print(f"[Aviso] Não foi possível guardar embeddings: {e}")
+                else:
+                    print("[ERRO] Falha na geração de embeddings.")
 
     print("\n=== Execução Concluída ===")
 
