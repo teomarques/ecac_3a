@@ -32,6 +32,7 @@ COL_MAG_Y = 8      # Coluna 9
 COL_MAG_Z = 9      # Coluna 10
 COL_TIMESTAMP = 10 # Coluna 11
 COL_ACTIVITY = 11  # Coluna 12
+COL_PARTICIPANT = 12 # Coluna 13 - ID do participante - Necessário para Meta 2 ex 3!
 
 # Grupos de colunas para cálculo dos módulos
 MODULO_INDICES = [
@@ -149,6 +150,28 @@ def carregar_dados_todos_participantes(base_dir="."):
         print("[Erro Fatal] Nenhum dado carregado. Verifique o caminho `base_dir`.")
         return np.array([])
 
+    return np.concatenate(dados_todos, axis=0)
+
+def carregar_dados_todos_com_id(base_dir="."):
+    """
+    (Helper para Tarefa 3 Meta 2) Carrega dados de TODOS os 15 participantes
+    e ADICIONA uma coluna com o ID do sujeito.
+    """
+    dados_todos = []
+    for part_num in range(15):
+        print(f"A carregar participante {part_num}...")
+        dados_p = carregar_dados_participante(part_num, base_dir)
+        if dados_p.size > 0:
+            # Criar coluna com o ID (part_num) repetido
+            col_id = np.full((dados_p.shape[0], 1), part_num)
+            # Juntar aos dados existentes
+            dados_p = np.hstack([dados_p, col_id])
+            dados_todos.append(dados_p)
+    
+    if not dados_todos:
+        print("[Erro Fatal] Nenhum dado carregado. Verifique o caminho `base_dir`.")
+        return np.array([])
+    
     return np.concatenate(dados_todos, axis=0)
 
 # --- Tarefa 3 (Intro): Preparação de Dados ---
@@ -784,6 +807,68 @@ def segmentar_janelas_puras_4_2(dados_raw, fs=51.2, janela_s=5.0, overlap=0.5):
     return segmentos
 
 
+def segmentar_janelas_com_sujeito(dados_raw, fs=51.2, janela_s=5.0, overlap=0.5):
+    """
+    (Tarefa 3 Meta 2) Segmenta janelas mantendo a informação do 'subject'.
+    Processa cada sujeito individualmente para evitar misturar dados.
+    Assume que dados_raw tem a coluna COL_PARTICIPANT (coluna 12).
+    """
+    win_size = int(janela_s * fs)
+    hop_size = int(win_size * (1.0 - overlap))
+    segmentos = []
+
+    # Identificar sujeitos únicos na coluna 12
+    sujeitos_unicos = np.unique(dados_raw[:, COL_PARTICIPANT])
+
+    for subj_id in sujeitos_unicos:
+        # Filtrar dados deste sujeito
+        mask_subj = dados_raw[:, COL_PARTICIPANT] == subj_id
+        dados_subj = dados_raw[mask_subj]
+
+        for sensor_id in range(1, 6):
+            mask_dev = dados_subj[:, COL_DEVICE_ID] == sensor_id
+            dados_dev = dados_subj[mask_dev]
+            
+            if dados_dev.size == 0:
+                continue
+
+            # Ordenar por tempo
+            idx_sort = np.argsort(dados_dev[:, COL_TIMESTAMP])
+            dados_dev = dados_dev[idx_sort]
+
+            # Blocos de atividade contínua
+            atividades = dados_dev[:, COL_ACTIVITY].astype(int)
+            change_idx = np.where(np.diff(atividades) != 0)[0] + 1
+            boundaries = np.concatenate(([0], change_idx, [len(atividades)]))
+
+            for b in range(len(boundaries) - 1):
+                i0, i1 = boundaries[b], boundaries[b + 1]
+                bloco = dados_dev[i0:i1]
+                if bloco.shape[0] < win_size:
+                    continue
+                
+                atividade = int(bloco[0, COL_ACTIVITY])
+                
+                # Matriz 9 colunas (Acc, Gyro, Mag)
+                X9 = np.stack([
+                    bloco[:, COL_ACC_X], bloco[:, COL_ACC_Y], bloco[:, COL_ACC_Z],
+                    bloco[:, COL_GYRO_X], bloco[:, COL_GYRO_Y], bloco[:, COL_GYRO_Z],
+                    bloco[:, COL_MAG_X], bloco[:, COL_MAG_Y], bloco[:, COL_MAG_Z],
+                ], axis=1)
+
+                for s, e in _windows_indices_4_2(bloco.shape[0], win_size, hop_size):
+                    seg = X9[s:e]
+                    if seg.shape[0] == win_size:
+                        segmentos.append({
+                            'device': sensor_id,
+                            'activity': atividade,
+                            'subject': int(subj_id), # <--- Guardamos o sujeito aqui
+                            'X': seg
+                        })
+    
+    return segmentos
+
+
 def _feature_vector_series_temporal_freq_4_2(series, fs):
     feats = []
     # Temporais
@@ -1269,6 +1354,8 @@ def tarefa_1_3_visualizacao(base_dir="."):
     print("--- Fim Tarefa 1.3 ---")
 
 
+# --- TAREFA 2: Embeddings com Modelo Pré-treinado ---
+
 def gerar_embeddings_dataset_2_1(segmentos, fs_original=51.2):
     """
     (Tarefa 2.1) Aplica as funções do embeddings_extractor.py para criar o dataset.
@@ -1336,6 +1423,231 @@ def gerar_embeddings_dataset_2_1(segmentos, fs_original=51.2):
     
     return embeddings_final
 
+
+# --- TAREFA 3: Validação e Classificação ---
+
+def split_within_subject_3_1(X, y, subjects, X_emb=None, train_r=0.6, val_r=0.2, random_state=42):
+    """
+    (Tarefa 3.1) Divide os dados em Train/Val/Test mantendo as proporções 
+    DENTRO de cada sujeito.
+    
+    Parâmetros:
+        X: matriz de features (n_amostras, n_features)
+        y: vetor de labels (n_amostras,)
+        subjects: vetor de IDs de sujeitos (n_amostras,)
+        X_emb: matriz de embeddings opcional (n_amostras, n_emb_features)
+        train_r: proporção de treino (default: 0.6 = 60%)
+        val_r: proporção de validação (default: 0.2 = 20%)
+        random_state: seed para reprodutibilidade
+    
+    Retorna:
+        dict com conjuntos train/val/test para features, embeddings (se fornecidos), labels e subjects
+    """
+    print(f"\n--- Tarefa 3.1: Split Within-Subject ({train_r*100:.0f}-{val_r*100:.0f}-{(1-train_r-val_r)*100:.0f}%) ---")
+    
+    np.random.seed(random_state)
+    
+    indices_train = []
+    indices_val = []
+    indices_test = []
+    
+    # Lista de sujeitos únicos
+    unique_subs = np.unique(subjects)
+    print(f"Número de sujeitos únicos: {len(unique_subs)}")
+    
+    for s in unique_subs:
+        # Índices onde o sujeito é 's'
+        idx_s = np.where(subjects == s)[0]
+        
+        # Baralhar índices deste sujeito
+        np.random.shuffle(idx_s)
+        
+        n = len(idx_s)
+        n_train = int(n * train_r)
+        n_val = int(n * val_r)
+        
+        # Fatiar
+        train_i = idx_s[:n_train]
+        val_i = idx_s[n_train : n_train + n_val]
+        test_i = idx_s[n_train + n_val:]
+        
+        indices_train.extend(train_i)
+        indices_val.extend(val_i)
+        indices_test.extend(test_i)
+    
+    # Converter para arrays numpy para indexação
+    idx_train = np.array(indices_train)
+    idx_val = np.array(indices_val)
+    idx_test = np.array(indices_test)
+    
+    # Construir dicionário de retorno
+    data_split = {
+        'X_train': X[idx_train], 'y_train': y[idx_train],
+        'X_val':   X[idx_val],   'y_val':   y[idx_val],
+        'X_test':  X[idx_test],  'y_test':  y[idx_test],
+        'sub_train': subjects[idx_train],
+        'sub_val':   subjects[idx_val],
+        'sub_test':  subjects[idx_test]
+    }
+    
+    # Adicionar embeddings se fornecidos
+    if X_emb is not None:
+        data_split['X_emb_train'] = X_emb[idx_train]
+        data_split['X_emb_val']   = X_emb[idx_val]
+        data_split['X_emb_test']  = X_emb[idx_test]
+        print(f"  Embeddings também divididos.")
+    
+    print(f"  Train: {len(idx_train)} amostras | Val: {len(idx_val)} amostras | Test: {len(idx_test)} amostras")
+    print(f"  Distribuição Train: {dict(zip(*np.unique(y[idx_train], return_counts=True)))}")
+    print(f"  Distribuição Val: {dict(zip(*np.unique(y[idx_val], return_counts=True)))}")
+    print(f"  Distribuição Test: {dict(zip(*np.unique(y[idx_test], return_counts=True)))}")
+    
+    return data_split
+
+
+def split_between_subject_3_2(X, y, subjects, X_emb=None, train_subs=9, val_subs=3, test_subs=3, random_state=42):
+    """
+    (Tarefa 3.2) Divide os dados em Train/Val/Test ao nível do SUJEITO.
+    O modelo treina com uns participantes e testa noutros totalmente novos.
+    """
+    print(f"\n--- Tarefa 3.2: Split Between-Subject ({train_subs} treinar, {val_subs} validar, {test_subs} testar) ---")
+    
+    np.random.seed(random_state)
+    
+    # 1. Obter lista de sujeitos únicos disponíveis nos dados
+    unique_subs = np.unique(subjects)
+    n_total = len(unique_subs)
+    
+    if n_total < (train_subs + val_subs + test_subs):
+        print(f"[Aviso] Número de sujeitos ({n_total}) inferior ao pedido. Ajustando...")
+        # Lógica de fallback simples (ex: resto vai para teste)
+    
+    # 2. Baralhar os SUJEITOS (não as linhas)
+    np.random.shuffle(unique_subs)
+    
+    # 3. Definir quais sujeitos vão para onde
+    subs_train = unique_subs[:train_subs]
+    subs_val   = unique_subs[train_subs : train_subs + val_subs]
+    subs_test  = unique_subs[train_subs + val_subs :]
+    
+    print(f"  Sujeitos Treino: {subs_train}")
+    print(f"  Sujeitos Validação: {subs_val}")
+    print(f"  Sujeitos Teste: {subs_test}")
+    
+    # 4. Criar máscaras booleanas baseadas nos IDs
+    mask_train = np.isin(subjects, subs_train)
+    mask_val   = np.isin(subjects, subs_val)
+    mask_test  = np.isin(subjects, subs_test)
+    
+    # 5. Construir dicionário de retorno
+    data_split = {
+        'X_train': X[mask_train], 'y_train': y[mask_train],
+        'X_val':   X[mask_val],   'y_val':   y[mask_val],
+        'X_test':  X[mask_test],  'y_test':  y[mask_test],
+        'sub_train': subjects[mask_train], # Útil para debug
+        'sub_val':   subjects[mask_val],
+        'sub_test':  subjects[mask_test]
+    }
+    
+    if X_emb is not None:
+        data_split['X_emb_train'] = X_emb[mask_train]
+        data_split['X_emb_val']   = X_emb[mask_val]
+        data_split['X_emb_test']  = X_emb[mask_test]
+        
+    print(f"  Train: {data_split['y_train'].shape[0]} amostras")
+    print(f"  Val:   {data_split['y_val'].shape[0]} amostras")
+    print(f"  Test:  {data_split['y_test'].shape[0]} amostras")
+    
+    return data_split
+
+
+def processar_cenarios_3_4(X_train, X_val, X_test, y_train, top_k=15, pca_var=0.90):
+    """
+    (Tarefa 3.4) Gera os 3 cenários (All, PCA, ReliefF) garantindo que
+    o 'fit' é feito apenas no conjunto de TREINO.
+    """
+    cenarios = {}
+
+    # 1. Normalização (Obrigatória para kNN e PCA)
+    # Fit no Train -> Transform no Train, Val, Test
+    scaler = StandardScaler()
+    X_train_norm = scaler.fit_transform(X_train)
+    X_val_norm   = scaler.transform(X_val)
+    X_test_norm  = scaler.transform(X_test)
+
+    # --- CENÁRIO A: Todas as Features (Normalizadas) ---
+    cenarios['all'] = {
+        'X_train': X_train_norm, 'X_val': X_val_norm, 'X_test': X_test_norm
+    }
+
+    # --- CENÁRIO B: PCA (90% Variância) ---
+    print(f"  > A ajustar PCA (var={pca_var*100:.0f}%)...")
+    pca = PCA(n_components=pca_var)
+    # Fit apenas no Train
+    pca.fit(X_train_norm)
+    
+    cenarios['pca'] = {
+        'X_train': pca.transform(X_train_norm),
+        'X_val':   pca.transform(X_val_norm),
+        'X_test':  pca.transform(X_test_norm)
+    }
+    print(f"    Componentes mantidas: {pca.n_components_}")
+
+    # --- CENÁRIO C: ReliefF (Top 15) ---
+    print(f"  > A executar ReliefF (Top {top_k})...")
+    # Usa a tua função relieff_4_5 existente.
+    # Nota: O y_train é necessário para calcular os scores.
+    # O n_samples limita o cálculo para ser rápido (o enunciado não proíbe subsampling para o ranking)
+    scores = relieff_4_5(X_train_norm, y_train, n_neighbors=10, n_samples=2000)
+    
+    # Selecionar índices das melhores features
+    order = np.argsort(np.abs(scores))[::-1] # Ordem decrescente
+    top_indices = order[:top_k]
+    
+    cenarios['relief'] = {
+        'X_train': X_train_norm[:, top_indices],
+        'X_val':   X_val_norm[:, top_indices],
+        'X_test':  X_test_norm[:, top_indices]
+    }
+    
+    return cenarios
+
+def pipeline_preparacao_3_4(split_data):
+    """
+    Orquestra o processamento para Features Clássicas e Embeddings.
+    Recebe o dicionário 'split_data' da Tarefa 3.1 ou 3.2.
+    """
+    resultados = {}
+    
+    # 1. Processar FEATURES CLÁSSICAS
+    print("\n--- Tarefa 3.4: Preparar Cenários (FEATURES) ---")
+    resultados['features'] = processar_cenarios_3_4(
+        split_data['X_train'], split_data['X_val'], split_data['X_test'],
+        split_data['y_train']
+    )
+    
+    # 2. Processar EMBEDDINGS (se existirem)
+    if 'X_emb_train' in split_data:
+        print("\n--- Tarefa 3.4: Preparar Cenários (EMBEDDINGS) ---")
+        X_train_e = split_data['X_emb_train']
+        X_val_e   = split_data['X_emb_val']
+        X_test_e  = split_data['X_emb_test']
+        
+        # Garantir que é 2D: (N, 512) e não (N, 512, 1)
+        if X_train_e.ndim > 2:
+            X_train_e = X_train_e.reshape(X_train_e.shape[0], -1)
+            X_val_e   = X_val_e.reshape(X_val_e.shape[0], -1)
+            X_test_e  = X_test_e.reshape(X_test_e.shape[0], -1)
+
+        resultados['embeddings'] = processar_cenarios_3_4(
+            X_train_e, X_val_e, X_test_e,
+            split_data['y_train']
+        )
+        
+    return resultados
+
+
+
 # --- Função Principal (main)  ---
 def main():
     """
@@ -1378,6 +1690,11 @@ def main():
     
     # META 2: Tarefa 2 - Embeddings
     RUN_META2_TASK_2_1 = True  # Gerar Embeddings Dataset
+    
+    # META 2: Tarefa 3 - Validação e Classificação
+    RUN_META2_TASK_3_1 = True  # Split Within-Subject
+    RUN_META2_TASK_3_2 = True  # Split Between-Subject
+    RUN_META2_TASK_3_4 = True  # Preparação de cenários (PCA, ReliefF, etc.)
 
     # --- FIM PAINEL DE CONTROLO ---
 
@@ -1499,44 +1816,57 @@ def main():
     # --- META 2 (MÓDULO B) ---
     # ==========================================
     
-    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3 or RUN_META2_TASK_2_1:
+    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3 or RUN_META2_TASK_2_1 or RUN_META2_TASK_3_1:
         print("\n" + "="*60)
         print("=== META 2 (MÓDULO B): DATA AUGMENTATION & EMBEDDINGS ===")
         print("="*60)
         print(f"Nota: Módulo B considera APENAS atividades 1-{ATIVIDADE_META2_MAX}\n")
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # 1. SEGMENTAÇÃO COMUM (Fonte única para Features e Embeddings)
-        print("--- Etapa 1: Segmentação de Dados (5s, 50% overlap) ---")
+        # 1. CARREGAR DADOS COM IDs DE PARTICIPANTES
+        print("--- Etapa 1: Carregamento de Dados com IDs ---")
         
-        # Verificar se dados_todos já foi carregado
-        if 'dados_todos' not in locals():
-            print("A carregar todos os dados dos participantes...")
-            dados_todos = carregar_dados_todos_participantes(base_dir=script_dir)
+        # Verificar se dados_todos já tem a coluna de IDs (coluna 12)
+        if 'dados_todos' not in locals() or dados_todos.shape[1] < 13:
+            print("A carregar dados COM IDs de participantes...")
+            dados_todos = carregar_dados_todos_com_id(base_dir=script_dir)
+        else:
+            print("Dados já carregados com IDs.")
         
         if dados_todos.size == 0:
             print("[ERRO] Nenhum dado disponível. A saltar Meta 2.")
         else:
-            # Segmentar janelas puras (reutiliza função da Tarefa 4.2)
-            print("A segmentar janelas puras (atividade constante)...")
-            segmentos = segmentar_janelas_puras_4_2(dados_todos, fs=51.2, janela_s=5.0, overlap=0.5)
+            # 2. SEGMENTAÇÃO COM SUJEITOS
+            print("\n--- Etapa 2: Segmentação de Dados (5s, 50% overlap, COM subject) ---")
             
-            # Extrair labels de todas as janelas
+            # Verificar se segmentos já têm informação de 'subject'
+            if 'segmentos' not in locals() or (len(segmentos) > 0 and 'subject' not in segmentos[0]):
+                print("A segmentar janelas COM informação de sujeitos...")
+                segmentos = segmentar_janelas_com_sujeito(dados_todos, fs=51.2, janela_s=5.0, overlap=0.5)
+            else:
+                print("Segmentos já existem com informação de sujeitos.")
+            
+            # Extrair vetores auxiliares alinhados
             y_todos = np.array([seg['activity'] for seg in segmentos], dtype=int)
-            print(f"Total de segmentos gerados: {len(segmentos)}")
-            print(f"Distribuição de atividades: {np.unique(y_todos, return_counts=True)}")
+            subjects_todos = np.array([seg['subject'] for seg in segmentos], dtype=int)
             
-            # 2. FILTRAGEM GLOBAL (Apenas Atividades 1-7 do Módulo B)
-            print(f"\n--- Etapa 2: Filtragem para Atividades 1-{ATIVIDADE_META2_MAX} ---")
+            print(f"Total de segmentos gerados: {len(segmentos)}")
+            print(f"Distribuição de atividades: {dict(zip(*np.unique(y_todos, return_counts=True)))}")
+            print(f"Número de sujeitos únicos: {len(np.unique(subjects_todos))}")
+            
+            # 3. FILTRAGEM GLOBAL (Apenas Atividades 1-7 do Módulo B)
+            print(f"\n--- Etapa 3: Filtragem para Atividades 1-{ATIVIDADE_META2_MAX} ---")
             mask_mod_b = y_todos <= ATIVIDADE_META2_MAX
             
             segmentos_mod_b = [seg for i, seg in enumerate(segmentos) if mask_mod_b[i]]
             y_mod_b = y_todos[mask_mod_b]
+            subjects_mod_b = subjects_todos[mask_mod_b]
             
             print(f"Segmentos após filtro: {len(segmentos_mod_b)}")
             print(f"Distribuição filtrada: {dict(zip(*np.unique(y_mod_b, return_counts=True)))}")
+            print(f"Sujeitos presentes: {np.unique(subjects_mod_b)}")
             
-            # 3. TAREFA 1: Data Augmentation (Features Manuais)
+            # 4. TAREFA 1: Data Augmentation (Features Manuais)
             if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3:
                 print("\n" + "-"*60)
                 print("--- TAREFA 1: Data Augmentation (Features Manuais) ---")
@@ -1558,7 +1888,7 @@ def main():
                     # Visualização SMOTE para participante 3
                     tarefa_1_3_visualizacao(base_dir=script_dir)
             
-            # 4. TAREFA 2: Embeddings Dataset
+            # 5. TAREFA 2: Embeddings Dataset
             if RUN_META2_TASK_2_1:
                 print("\n" + "-"*60)
                 print("--- TAREFA 2.1: Geração de Embeddings (Modelo Pré-treinado) ---")
@@ -1588,6 +1918,163 @@ def main():
                         print(f"[Aviso] Não foi possível guardar embeddings: {e}")
                 else:
                     print("[ERRO] Falha na geração de embeddings.")
+            
+            # 6. TAREFA 3: Validação e Classificação
+            if RUN_META2_TASK_3_1:
+                print("\n" + "-"*60)
+                print("--- TAREFA 3.1: Split Within-Subject (Train/Val/Test) ---")
+                print("-"*60)
+                
+                # Verificar se temos features e/ou embeddings disponíveis
+                if 'X_features' not in locals():
+                    print("A extrair features manuais para split...")
+                    X_features = []
+                    for seg in segmentos_mod_b:
+                        fv, _ = extrair_features_janela_4_2(seg, fs=51.2)
+                        X_features.append(fv)
+                    X_features = np.vstack(X_features)
+                
+                # Preparar embeddings se existirem
+                X_emb_param = X_embeddings if 'X_embeddings' in locals() and X_embeddings.size > 0 else None
+                
+                # Executar split
+                split_data = split_within_subject_3_1(
+                    X_features, 
+                    y_mod_b, 
+                    subjects_mod_b, 
+                    X_emb=X_emb_param,
+                    train_r=0.6,
+                    val_r=0.2,
+                    random_state=42
+                )
+                
+                # Acesso aos dados divididos
+                print(f"\n✓ Split realizado com sucesso!")
+                print(f"  Features Train: {split_data['X_train'].shape}")
+                print(f"  Features Val: {split_data['X_val'].shape}")
+                print(f"  Features Test: {split_data['X_test'].shape}")
+                
+                if 'X_emb_train' in split_data:
+                    print(f"  Embeddings Train: {split_data['X_emb_train'].shape}")
+                    print(f"  Embeddings Val: {split_data['X_emb_val'].shape}")
+                    print(f"  Embeddings Test: {split_data['X_emb_test'].shape}")
+                
+                # Opcional: Guardar splits para uso posterior
+                try:
+                    np.save("meta2_split_X_train.npy", split_data['X_train'])
+                    np.save("meta2_split_y_train.npy", split_data['y_train'])
+                    np.save("meta2_split_X_val.npy", split_data['X_val'])
+                    np.save("meta2_split_y_val.npy", split_data['y_val'])
+                    np.save("meta2_split_X_test.npy", split_data['X_test'])
+                    np.save("meta2_split_y_test.npy", split_data['y_test'])
+                    
+                    if 'X_emb_train' in split_data:
+                        np.save("meta2_split_X_emb_train.npy", split_data['X_emb_train'])
+                        np.save("meta2_split_X_emb_val.npy", split_data['X_emb_val'])
+                        np.save("meta2_split_X_emb_test.npy", split_data['X_emb_test'])
+                    
+                    print(f"\n✓ Splits guardados em ficheiros .npy")
+                except Exception as e:
+                    print(f"[Aviso] Não foi possível guardar splits: {e}")
+            
+            # 7. TAREFA 3.2: Split Between-Subject
+            if RUN_META2_TASK_3_2:
+                print("\n" + "-"*60)
+                print("--- TAREFA 3.2: Split Between-Subject (9/3/3 sujeitos) ---")
+                print("-"*60)
+                
+                # Verificar se temos features e/ou embeddings disponíveis
+                if 'X_features' not in locals():
+                    print("A extrair features manuais para split...")
+                    X_features = []
+                    for seg in segmentos_mod_b:
+                        fv, _ = extrair_features_janela_4_2(seg, fs=51.2)
+                        X_features.append(fv)
+                    X_features = np.vstack(X_features)
+                
+                # Preparar embeddings se existirem
+                X_emb_param = X_embeddings if 'X_embeddings' in locals() and X_embeddings.size > 0 else None
+                
+                # Executar split Between-Subject
+                split_data_v2 = split_between_subject_3_2(
+                    X_features, 
+                    y_mod_b, 
+                    subjects_mod_b, 
+                    X_emb=X_emb_param,
+                    train_subs=9,
+                    val_subs=3,
+                    test_subs=3,
+                    random_state=42
+                )
+                
+                # Acesso aos dados divididos
+                print(f"\n✓ Split Between-Subject realizado com sucesso!")
+                print(f"  Features Train: {split_data_v2['X_train'].shape} ({len(np.unique(split_data_v2['sub_train']))} sujeitos)")
+                print(f"  Features Val: {split_data_v2['X_val'].shape} ({len(np.unique(split_data_v2['sub_val']))} sujeitos)")
+                print(f"  Features Test: {split_data_v2['X_test'].shape} ({len(np.unique(split_data_v2['sub_test']))} sujeitos)")
+                print(f"  Sujeitos Train: {np.unique(split_data_v2['sub_train'])}")
+                print(f"  Sujeitos Val: {np.unique(split_data_v2['sub_val'])}")
+                print(f"  Sujeitos Test: {np.unique(split_data_v2['sub_test'])}")
+                
+                if 'X_emb_train' in split_data_v2:
+                    print(f"  Embeddings Train: {split_data_v2['X_emb_train'].shape}")
+                    print(f"  Embeddings Val: {split_data_v2['X_emb_val'].shape}")
+                    print(f"  Embeddings Test: {split_data_v2['X_emb_test'].shape}")
+                
+                # Opcional: Guardar splits para uso posterior (com sufixo _v2)
+                try:
+                    np.save("meta2_split_v2_X_train.npy", split_data_v2['X_train'])
+                    np.save("meta2_split_v2_y_train.npy", split_data_v2['y_train'])
+                    np.save("meta2_split_v2_X_val.npy", split_data_v2['X_val'])
+                    np.save("meta2_split_v2_y_val.npy", split_data_v2['y_val'])
+                    np.save("meta2_split_v2_X_test.npy", split_data_v2['X_test'])
+                    np.save("meta2_split_v2_y_test.npy", split_data_v2['y_test'])
+                    
+                    if 'X_emb_train' in split_data_v2:
+                        np.save("meta2_split_v2_X_emb_train.npy", split_data_v2['X_emb_train'])
+                        np.save("meta2_split_v2_X_emb_val.npy", split_data_v2['X_emb_val'])
+                        np.save("meta2_split_v2_X_emb_test.npy", split_data_v2['X_emb_test'])
+                    
+                    print(f"\n✓ Splits Between-Subject guardados em ficheiros .npy (sufixo _v2)")
+                except Exception as e:
+                    print(f"[Aviso] Não foi possível guardar splits: {e}")
+            
+            # 8. TAREFA 3.4: Preparação de Cenários (PCA, ReliefF, etc.)
+            if RUN_META2_TASK_3_4:
+                print("\n" + "-"*60)
+                print("--- TAREFA 3.4: Preparação de Cenários para Classificação ---")
+                print("-"*60)
+                
+                # Determinar qual split usar (prioriza Between-Subject se disponível)
+                if 'split_data_v2' in locals():
+                    dados_para_processar = split_data_v2
+                    print("\nA processar dados da estratégia BETWEEN-SUBJECT (3.2)...")
+                elif 'split_data' in locals():
+                    dados_para_processar = split_data
+                    print("\nA processar dados da estratégia WITHIN-SUBJECT (3.1)...")
+                else:
+                    print("[Erro] Nenhum split data encontrado. Execute Tarefa 3.1 ou 3.2 primeiro.")
+                    dados_para_processar = None
+                
+                if dados_para_processar:
+                    # Executa a pipeline 3.4
+                    cenarios_finais = pipeline_preparacao_3_4(dados_para_processar)
+                    
+                    # Mostrar resumo dos cenários gerados
+                    print("\n✓ Cenários gerados e prontos para classificação (Tarefa 4/5).")
+                    if 'features' in cenarios_finais:
+                        print(f"  Features All: {cenarios_finais['features']['all']['X_train'].shape}")
+                        print(f"  Features PCA: {cenarios_finais['features']['pca']['X_train'].shape}")
+                        print(f"  Features ReliefF: {cenarios_finais['features']['relief']['X_train'].shape}")
+                    
+                    if 'embeddings' in cenarios_finais:
+                        print(f"  Embeddings All: {cenarios_finais['embeddings']['all']['X_train'].shape}")
+                        print(f"  Embeddings PCA: {cenarios_finais['embeddings']['pca']['X_train'].shape}")
+                        print(f"  Embeddings ReliefF: {cenarios_finais['embeddings']['relief']['X_train'].shape}")
+                    
+                    # Exemplo de como aceder aos dados:
+                    # X_train_pca = cenarios_finais['features']['pca']['X_train']
+                    # y_train = cenarios_finais['features']['pca']['y_train']
 
     print("\n=== Execução Concluída ===")
 
