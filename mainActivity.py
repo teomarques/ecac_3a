@@ -17,6 +17,9 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
 import torch
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+import seaborn as sns  # Opcional, mas excelente para visualizar a matriz de confusão
 
 # --- Constantes Globais (Baseado no PDF) ---
 # Mapeamento 1-para-1 com o PDF (1-based-indexing) para 0-based-indexing
@@ -1561,92 +1564,227 @@ def split_between_subject_3_2(X, y, subjects, X_emb=None, train_subs=9, val_subs
     return data_split
 
 
-def processar_cenarios_3_4(X_train, X_val, X_test, y_train, top_k=15, pca_var=0.90):
+def processar_cenarios_3_4(X_train, X_val, X_test, y_train, y_val, y_test, top_k=15, pca_var=0.90):
     """
-    (Tarefa 3.4) Gera os 3 cenários (All, PCA, ReliefF) garantindo que
-    o 'fit' é feito apenas no conjunto de TREINO.
+    (Tarefa 3.4 - Atualizada) Gera cenários e GUARDA OS LABELS (y) junto.
     """
     cenarios = {}
 
-    # 1. Normalização (Obrigatória para kNN e PCA)
-    # Fit no Train -> Transform no Train, Val, Test
+    # 1. Normalização
     scaler = StandardScaler()
     X_train_norm = scaler.fit_transform(X_train)
     X_val_norm   = scaler.transform(X_val)
     X_test_norm  = scaler.transform(X_test)
 
-    # --- CENÁRIO A: Todas as Features (Normalizadas) ---
+    # --- CENÁRIO A: Todas as Features ---
+    # Agora guardamos y aqui dentro para não haver misturas
     cenarios['all'] = {
-        'X_train': X_train_norm, 'X_val': X_val_norm, 'X_test': X_test_norm
+        'X_train': X_train_norm, 'y_train': y_train,
+        'X_val':   X_val_norm,   'y_val':   y_val,
+        'X_test':  X_test_norm,  'y_test':  y_test
     }
 
-    # --- CENÁRIO B: PCA (90% Variância) ---
+    # --- CENÁRIO B: PCA ---
     print(f"  > A ajustar PCA (var={pca_var*100:.0f}%)...")
     pca = PCA(n_components=pca_var)
-    # Fit apenas no Train
     pca.fit(X_train_norm)
     
     cenarios['pca'] = {
-        'X_train': pca.transform(X_train_norm),
-        'X_val':   pca.transform(X_val_norm),
-        'X_test':  pca.transform(X_test_norm)
+        'X_train': pca.transform(X_train_norm), 'y_train': y_train,
+        'X_val':   pca.transform(X_val_norm),   'y_val':   y_val,
+        'X_test':  pca.transform(X_test_norm),  'y_test':  y_test
     }
-    print(f"    Componentes mantidas: {pca.n_components_}")
 
-    # --- CENÁRIO C: ReliefF (Top 15) ---
+    # --- CENÁRIO C: ReliefF ---
     print(f"  > A executar ReliefF (Top {top_k})...")
-    # Usa a tua função relieff_4_5 existente.
-    # Nota: O y_train é necessário para calcular os scores.
-    # O n_samples limita o cálculo para ser rápido (o enunciado não proíbe subsampling para o ranking)
     scores = relieff_4_5(X_train_norm, y_train, n_neighbors=10, n_samples=2000)
-    
-    # Selecionar índices das melhores features
-    order = np.argsort(np.abs(scores))[::-1] # Ordem decrescente
+    order = np.argsort(np.abs(scores))[::-1]
     top_indices = order[:top_k]
     
     cenarios['relief'] = {
-        'X_train': X_train_norm[:, top_indices],
-        'X_val':   X_val_norm[:, top_indices],
-        'X_test':  X_test_norm[:, top_indices]
+        'X_train': X_train_norm[:, top_indices], 'y_train': y_train,
+        'X_val':   X_val_norm[:, top_indices],   'y_val':   y_val,
+        'X_test':  X_test_norm[:, top_indices],  'y_test':  y_test
     }
     
     return cenarios
 
 def pipeline_preparacao_3_4(split_data):
     """
-    Orquestra o processamento para Features Clássicas e Embeddings.
-    Recebe o dicionário 'split_data' da Tarefa 3.1 ou 3.2.
+    (Atualizada) Passa os y_train, y_val, y_test para o processamento.
     """
     resultados = {}
     
-    # 1. Processar FEATURES CLÁSSICAS
+    y_tr = split_data['y_train']
+    y_va = split_data['y_val']
+    y_te = split_data['y_test']
+    
+    # 1. Processar FEATURES
     print("\n--- Tarefa 3.4: Preparar Cenários (FEATURES) ---")
     resultados['features'] = processar_cenarios_3_4(
         split_data['X_train'], split_data['X_val'], split_data['X_test'],
-        split_data['y_train']
+        y_tr, y_va, y_te  # <--- Passamos os y explicitamente
     )
     
-    # 2. Processar EMBEDDINGS (se existirem)
+    # 2. Processar EMBEDDINGS
     if 'X_emb_train' in split_data:
         print("\n--- Tarefa 3.4: Preparar Cenários (EMBEDDINGS) ---")
         X_train_e = split_data['X_emb_train']
         X_val_e   = split_data['X_emb_val']
         X_test_e  = split_data['X_emb_test']
         
-        # Garantir que é 2D: (N, 512) e não (N, 512, 1)
+        # Achatar se for 3D (N, 512, 1) -> (N, 512)
         if X_train_e.ndim > 2:
-            X_train_e = X_train_e.reshape(X_train_e.shape[0], -1)
-            X_val_e   = X_val_e.reshape(X_val_e.shape[0], -1)
-            X_test_e  = X_test_e.reshape(X_test_e.shape[0], -1)
+            X_train_e = X_train_e.squeeze()
+            X_val_e   = X_val_e.squeeze()
+            X_test_e  = X_test_e.squeeze()
 
         resultados['embeddings'] = processar_cenarios_3_4(
             X_train_e, X_val_e, X_test_e,
-            split_data['y_train']
+            y_tr, y_va, y_te
         )
         
     return resultados
 
 
+# --- Tarefa 4.1: Implementação Manual do k-NN ---
+
+class KNNClassifierCustom:
+    """
+    Implementação manual do k-Nearest Neighbors (k-NN).
+    Usa distância Euclidiana e votação maioritária.
+    """
+    def __init__(self, k=3):
+        self.k = k
+        self.X_train = None
+        self.y_train = None
+
+    def fit(self, X, y):
+        """
+        No k-NN, o 'fit' é apenas armazenar os dados de treino.
+        """
+        self.X_train = X
+        self.y_train = y
+
+    def predict(self, X_test):
+        """
+        Calcula distâncias e prevê a classe para cada amostra de teste.
+        """
+        predictions = []
+        # Nota: Isto pode ser lento para muitos dados. 
+        # Para o Módulo B, recomenda-se usar o sklearn.
+        for i, row in enumerate(X_test):
+            # 1. Calcular distância Euclidiana a todos os pontos de treino
+            # (X_train - row)^2 -> sum -> sqrt
+            distances = np.sqrt(np.sum((self.X_train - row)**2, axis=1))
+            
+            # 2. Encontrar os índices dos k vizinhos mais próximos
+            # np.argsort devolve os índices que ordenariam o array
+            k_indices = np.argsort(distances)[:self.k]
+            
+            # 3. Obter as labels desses vizinhos
+            k_nearest_labels = self.y_train[k_indices]
+            
+            # 4. Votação Maioritária (Moda)
+            # stats.mode retorna (moda, contagem). 
+            # keepdims=True é necessário em versões recentes do scipy
+            try:
+                moda_result = stats.mode(k_nearest_labels, keepdims=True)
+                pred = moda_result.mode[0]
+            except TypeError:
+                # Fallback para versões antigas do scipy
+                pred = stats.mode(k_nearest_labels).mode[0]
+                
+            predictions.append(pred)
+            
+        return np.array(predictions)
+
+
+def avaliar_resultados_4_2(y_true, y_pred, titulo="Resultados"):
+    """
+    (Tarefa 4.2) Calcula e apresenta métricas de classificação.
+    Retorna um dicionário com os valores para análise posterior.
+    """
+    print(f"\n--- Relatório de Avaliação: {titulo} ---")
+    
+    # 1. Métricas Globais
+    # 'weighted': calcula a métrica para cada classe e faz a média ponderada pelo nº de amostras (bom para desequilibrados)
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+    rec = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+    f1 = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+    
+    print(f"  Accuracy:  {acc:.4f}")
+    print(f"  Precision: {prec:.4f}")
+    print(f"  Recall:    {rec:.4f}")
+    print(f"  F1-Score:  {f1:.4f}")
+    
+    # 2. Relatório Detalhado por Classe
+    # Mostra precisão/recall para cada atividade individualmente (Sentado, Correr, etc.)
+    print("\n  Relatório por Classe:")
+    print(classification_report(y_true, y_pred, zero_division=0))
+    
+    # 3. Matriz de Confusão
+    cm = confusion_matrix(y_true, y_pred)
+    
+    metrics = {
+        'accuracy': acc,
+        'precision': prec,
+        'recall': rec,
+        'f1': f1,
+        'confusion_matrix': cm
+    }
+    
+    return metrics
+
+def plotar_matriz_confusao(cm, classes, titulo="Matriz de Confusão"):
+    """
+    (Auxiliar) Gera um heatmap bonito da matriz de confusão.
+    """
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=classes, yticklabels=classes)
+    plt.title(titulo)
+    plt.ylabel('Verdadeiro')
+    plt.xlabel('Previsto')
+    plt.tight_layout()
+    # Podes guardar se quiseres:
+    # plt.savefig(f"graphs/cm_{titulo.replace(' ', '_')}.png")
+    plt.show()
+
+
+# --- Tarefa 5.1: Sintonização de Hiperparâmetros (k) ---
+
+def sintonizar_k_5_1(X_train, y_train, X_val, y_val, k_lista=range(1, 20, 2)):
+    """
+    (Tarefa 5.1) Testa vários valores de k usando o conjunto de Validação.
+    Retorna o melhor k e o histórico de scores.
+    """
+    best_k = -1
+    best_score = -1.0
+    historico = [] # Para guardar (k, score) e fazer gráficos se quiseres
+    
+    # print(f"    > A testar k={list(k_lista)}...")
+    
+    for k in k_lista:
+        # 1. Treinar com k atual
+        knn = KNeighborsClassifier(n_neighbors=k)
+        knn.fit(X_train, y_train)
+        
+        # 2. Avaliar na Validação
+        preds_val = knn.predict(X_val)
+        
+        # Usamos F1-Weighted como métrica de decisão (melhor para classes desequilibradas)
+        score = f1_score(y_val, preds_val, average='weighted', zero_division=0)
+        
+        historico.append((k, score))
+        
+        if score > best_score:
+            best_score = score
+            best_k = k
+            
+    # print(f"      -> Melhor k: {best_k} (F1-Score na Validação: {best_score:.4f})")
+    return best_k, best_score, historico
 
 # --- Função Principal (main)  ---
 def main():
@@ -1695,6 +1833,13 @@ def main():
     RUN_META2_TASK_3_1 = True  # Split Within-Subject
     RUN_META2_TASK_3_2 = True  # Split Between-Subject
     RUN_META2_TASK_3_4 = True  # Preparação de cenários (PCA, ReliefF, etc.)
+    
+    # META 2: Tarefa 4 - Classificação
+    RUN_META2_TASK_4_1 = True  # Teste do k-NN manual
+    RUN_META2_TASK_4_2 = True  # Função de Avaliação (Métricas)
+    
+    # META 2: Tarefa 5 - Sintonização de Hiperparâmetros
+    RUN_META2_TASK_5_1 = True  # Sintonização de k (Grid Search no Conjunto de Validação)
 
     # --- FIM PAINEL DE CONTROLO ---
 
@@ -1816,7 +1961,7 @@ def main():
     # --- META 2 (MÓDULO B) ---
     # ==========================================
     
-    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3 or RUN_META2_TASK_2_1 or RUN_META2_TASK_3_1:
+    if RUN_META2_TASK_1_1 or RUN_META2_TASK_1_3 or RUN_META2_TASK_2_1 or RUN_META2_TASK_3_1 or RUN_META2_TASK_3_2 or RUN_META2_TASK_3_4 or RUN_META2_TASK_4_1 or RUN_META2_TASK_4_2 or RUN_META2_TASK_5_1:
         print("\n" + "="*60)
         print("=== META 2 (MÓDULO B): DATA AUGMENTATION & EMBEDDINGS ===")
         print("="*60)
@@ -2075,6 +2220,168 @@ def main():
                     # Exemplo de como aceder aos dados:
                     # X_train_pca = cenarios_finais['features']['pca']['X_train']
                     # y_train = cenarios_finais['features']['pca']['y_train']
+            
+            # 9. TAREFA 4.1: Teste do Modelo k-NN Manual
+            if RUN_META2_TASK_4_1:
+                print("\n" + "-"*60)
+                print("--- TAREFA 4.1: Modelo k-NN (Teste da Implementação Manual) ---")
+                print("-"*60)
+                
+                # Verificar se temos cenários processados
+                if 'cenarios_finais' in locals() and 'features' in cenarios_finais:
+                    X_tr = cenarios_finais['features']['all']['X_train']
+                    X_te = cenarios_finais['features']['all']['X_test'][:5]  # Só 5 amostras para teste rápido
+                    
+                    # Obter y_train do split usado
+                    if 'split_data_v2' in locals():
+                        y_tr = split_data_v2['y_train']
+                        y_te_real = split_data_v2['y_test'][:5]
+                        print("  Usando dados do split BETWEEN-SUBJECT (3.2)")
+                    elif 'split_data' in locals():
+                        y_tr = split_data['y_train']
+                        y_te_real = split_data['y_test'][:5]
+                        print("  Usando dados do split WITHIN-SUBJECT (3.1)")
+                    else:
+                        print("  [Erro] Nenhum split disponível.")
+                        y_tr = None
+                    
+                    if y_tr is not None:
+                        print(f"\n  A testar implementação manual (KNNClassifierCustom) com 5 amostras...")
+                        knn_manual = KNNClassifierCustom(k=3)
+                        knn_manual.fit(X_tr, y_tr)
+                        preds = knn_manual.predict(X_te)
+                        print(f"    Previsões (Manual): {preds}")
+                        print(f"    Labels reais:       {y_te_real}")
+                        print(f"    Acertos: {np.sum(preds == y_te_real)}/5")
+                        
+                        print("\n  (Para as tarefas seguintes, usaremos sklearn.neighbors.KNeighborsClassifier por motivos de performance)")
+                else:
+                    print("  [Erro] Cenários não encontrados. Execute Tarefa 3.4 primeiro.")
+            
+            # 10. TAREFA 4.2: Função de Avaliação (Métricas)
+            if RUN_META2_TASK_4_2:
+                print("\n" + "-"*60)
+                print("--- TAREFA 4.2: Função de Avaliação (Métricas) ---")
+                print("-"*60)
+                
+                # Verificar se temos cenários processados
+                if 'cenarios_finais' in locals() and 'features' in cenarios_finais:
+                    # Usar 100 amostras do conjunto de teste para ser rápido
+                    X_teste_real = cenarios_finais['features']['all']['X_test'][:100]
+                    X_train_real = cenarios_finais['features']['all']['X_train']
+                    
+                    # Obter labels do split usado
+                    if 'split_data_v2' in locals():
+                        y_teste_real = split_data_v2['y_test'][:100]
+                        y_train_real = split_data_v2['y_train']
+                        print("  Usando dados do split BETWEEN-SUBJECT (3.2)")
+                    elif 'split_data' in locals():
+                        y_teste_real = split_data['y_test'][:100]
+                        y_train_real = split_data['y_train']
+                        print("  Usando dados do split WITHIN-SUBJECT (3.1)")
+                    else:
+                        print("  [Erro] Nenhum split disponível.")
+                        y_teste_real = None
+                    
+                    if y_teste_real is not None:
+                        print(f"\n  A treinar sklearn KNeighborsClassifier (k=3) com {X_train_real.shape[0]} amostras...")
+                        knn_sk = KNeighborsClassifier(n_neighbors=3)
+                        knn_sk.fit(X_train_real, y_train_real)
+                        
+                        print(f"  A prever 100 amostras de teste...")
+                        preds_sk = knn_sk.predict(X_teste_real)
+                        
+                        print("\n  A calcular métricas de avaliação...")
+                        metricas = avaliar_resultados_4_2(y_teste_real, preds_sk, titulo="Teste KNN (k=3)")
+                        
+                        print(f"\n  ✓ Métricas calculadas:")
+                        print(f"    Acurácia: {metricas['accuracy']:.4f}")
+                        print(f"    Precisão (weighted): {metricas['precision']:.4f}")
+                        print(f"    Recall (weighted): {metricas['recall']:.4f}")
+                        print(f"    F1-Score (weighted): {metricas['f1']:.4f}")
+                        
+                        # Opcional: Plotar matriz de confusão (comentado para não bloquear execução)
+                        # print("\n  A gerar matriz de confusão...")
+                        # plotar_matriz_confusao(metricas['confusion_matrix'], classes=range(1, 8), titulo="Matriz de Confusão - KNN (k=3)")
+                else:
+                    print("  [Erro] Cenários não encontrados. Execute Tarefa 3.4 primeiro.")
+            
+            # 11. TAREFA 5.1: Sintonização de Hiperparâmetros (k)
+            if RUN_META2_TASK_5_1:
+                print("\n" + "="*60)
+                print("--- TAREFA 5.1: SINTONIZAÇÃO DE HIPERPARÂMETROS (k) ---")
+                print("="*60)
+                
+                # Estrutura para guardar os melhores k de cada cenário
+                melhores_ks = {}
+                
+                # Dica: Certifica-te que geras os cenários para AMBAS as estratégias antes de entrar aqui.
+                # Preparação ideal:
+                estrategias_disponiveis = {}
+                
+                # Se tiveres corrido a 3.1:
+                if 'split_data' in locals():
+                    print("Gerando cenários para Within-Subject...")
+                    estrategias_disponiveis['Within-Subject'] = pipeline_preparacao_3_4(split_data)
+                    
+                # Se tiveres corrido a 3.2:
+                if 'split_data_v2' in locals():
+                    print("Gerando cenários para Between-Subject...")
+                    estrategias_disponiveis['Between-Subject'] = pipeline_preparacao_3_4(split_data_v2)
+                
+                if not estrategias_disponiveis:
+                    print("[Erro] Nenhuma estratégia de split encontrada. Execute Tarefa 3.1 ou 3.2 primeiro.")
+                else:
+                    # LOOP CORRIGIDO
+                    for nome_strat, cenarios_dict in estrategias_disponiveis.items():
+                        print(f"\n>>> Estratégia: {nome_strat}")
+                        melhores_ks[nome_strat] = {}
+                        
+                        for tipo_dado in ['features', 'embeddings']:
+                            if tipo_dado not in cenarios_dict:
+                                continue
+                            
+                            print(f"  > Dataset: {tipo_dado.upper()}")
+                            melhores_ks[nome_strat][tipo_dado] = {}
+                            
+                            for proc in ['all', 'pca', 'relief']:
+                                if proc not in cenarios_dict[tipo_dado]:
+                                    continue
+                                
+                                data_pack = cenarios_dict[tipo_dado][proc]
+                                
+                                # --- AQUI ESTÁ A CORREÇÃO ---
+                                # Buscamos X e y do mesmo sítio. Impossível haver erro de tamanho.
+                                X_tr = data_pack['X_train']
+                                y_tr = data_pack['y_train']
+                                X_val = data_pack['X_val']
+                                y_val = data_pack['y_val']
+                                
+                                # Sintonização
+                                best_k, best_score, _ = sintonizar_k_5_1(X_tr, y_tr, X_val, y_val)
+                                
+                                melhores_ks[nome_strat][tipo_dado][proc] = best_k
+                                print(f"    [{proc:6s}] Melhor k={best_k:2d} (F1-Val={best_score:.2%})")
+                    
+                    # Resumo final
+                    print("\n" + "="*60)
+                    print("RESUMO DOS MELHORES VALORES DE k:")
+                    print("="*60)
+                    for strat_name, datasets in melhores_ks.items():
+                        print(f"\n{strat_name}:")
+                        for tipo_dado, processamentos in datasets.items():
+                            print(f"  {tipo_dado.upper()}:")
+                            for proc, k_val in processamentos.items():
+                                print(f"    {proc:8s}: k={k_val}")
+                    
+                    # Opcional: Guardar resultados em ficheiro
+                    try:
+                        import json
+                        with open("meta2_melhores_ks.json", "w") as f:
+                            json.dump(melhores_ks, f, indent=2)
+                        print("\n✓ Melhores valores de k guardados em 'meta2_melhores_ks.json'")
+                    except Exception as e:
+                        print(f"\n[Aviso] Não foi possível guardar resultados: {e}")
 
     print("\n=== Execução Concluída ===")
 
